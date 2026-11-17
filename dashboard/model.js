@@ -20,12 +20,6 @@ function calibrate(s){
  return [c,{peer_count:n,raw_category_median:raw,category_median:cm,global_median:global,multiple:clamp((n*(cm??0)+6*global)/(n+6),global/3,global*3)}];}));
  return {global_multiple:global,global_peer_count:s.peers.length,shrinkage_k:6,categories};
 }
-const exactActions={
- 'Onchain Capital Allocator':'Deposit','Indexes':'Buy index shares worth','Risk Curators':'Deposit','Options Vault':'Deposit',
- 'Restaking':'Restake','Dexs':'Add liquidity worth','Lending':'Supply','CDP':'Deposit collateral worth',
- 'Prediction Market':'Fund a prediction market account with','Governance Incentives':'Allocate',
- 'Crypto Card Issuer':'Fund a card account with','Insurance':'Buy cover with a premium of'
-};
 function plan(p){
  let amount=p.tvl_usd>=1e9?250:p.tvl_usd>=1e8?150:p.tvl_usd>=2e7?75:40;
  const chain=p.chains.find(c=>c!=='Ethereum')??p.chains[0]??'the supported chain',age=p.listed_days;
@@ -36,28 +30,71 @@ function plan(p){
  // Reserve setup, entry, repeat actions and exit, plus a 1% service allowance.
  while(tx*gas[1]+Math.ceil(amount*.01)>amount*.1)amount=Math.ceil((amount+1)/50)*50;
  const fee=Math.ceil(amount*.01);
- let action=exactActions[c];
- if(!action){
- if(/vault|curator|allocator|index|restak|yield|farm/i.test(c))action='Deposit';
- else if(/lend|cdp|collateral/i.test(c))action='Supply collateral worth';
- else if(/dex|liquidity/i.test(c))action='Add liquidity worth';
- else if(/\bbridge\b|\bchain\b/i.test(c))action='Transfer';
- else if(/derivative|options|trading/i.test(c))action='Fund a trading account with';
- else if(/payment/i.test(c))action='Make a payment of';
- else if(/stak/i.test(c))action='Stake';
- else action='Allocate';
- }
- const trading=/derivative|options|trading|\bbridge\b|\bchain\b/i.test(c)&&!/vault/i.test(c);
- const product=/exchange|aggregator/i.test(c)?'position':/vault|curator|allocator|yield|farm/i.test(c)?'vault':null;
- const target=product?`${/^[aeiou]/i.test(p.name)?'an':'a'} ${p.name} ${product}`:p.name;
  const summary={capital_usd:amount,estimated_total_fees_usd:[Number((tx*gas[0]).toFixed(2)),tx*gas[1]+fee],setup_minutes:30,hold_days:days};
+ const entry=`$${amount} on ${chain} through ${p.name}`;
+ const monitor=`${cadence==='monthly'?'Monthly':'Weekly'} on ${chain}`;
+ const playbooks=[
+ [/risk curator/i,[
+  `Deposit a supported stablecoin worth ${entry} into the curator vault; verify its collateral exposure, curator mandate and redemption terms.`,
+  `Record the vault shares received and starting share price for ${p.name}; check which lending markets and collateral assets the curator can allocate to.`,
+  `${monitor}: track vault share price, curator rebalancing, utilization and bad-debt exposure. Keep the stablecoin vault position only while its mandate fits.`,
+  `After ${days} days, compare ${p.name} vault share value with the original stablecoin deposit and review any redemption queue before requesting withdrawal.`]],
+ [/onchain capital allocator/i,[
+  `Deposit a supported stablecoin worth ${entry} into an allocator vault after reviewing strategy weights, manager permissions and redemption limits.`,
+  `${monitor}: inspect ${p.name}'s stablecoin allocations, strategy returns and manager changes; rebalance only when the stated strategy requires it.`,
+  `At ${days} days, reconcile allocator vault shares against the stablecoin deposit and request redemption if strategy risk or withdrawal terms have changed.`]],
+ [/lend/i,[
+  `Supply a supported stablecoin worth ${entry} to the lending market; check utilization, supply caps and available withdrawal liquidity.`,
+  `Borrow only if a lending loop is intended: cap initial borrowing at 30% LTV against the supplied collateral, use a supported stablecoin and record the liquidation threshold. Otherwise keep ${p.name} supply-only.`,
+  `${monitor}: watch health factor, collateral prices, variable borrow rates and stablecoin liquidity. Repay debt early if health factor approaches 2; do not increase borrowing to manufacture activity.`,
+  `At ${days} days, compare ${p.name} stablecoin supply interest with borrowing costs, repay all debt before removing collateral and check withdrawal liquidity.`]],
+ [/^cdp$|collateralized debt/i,[
+  `Deposit supported collateral worth ${entry} into a CDP; verify its oracle, liquidation threshold and collateral-specific debt ceiling.`,
+  `Mint the protocol stablecoin against that collateral only below a 30% initial LTV ceiling and below the product's own limit; keep a stablecoin repayment reserve outside ${p.name}.`,
+  `${monitor}: check collateral value, stablecoin peg, stability fees and liquidation distance; repay minted debt if LTV rises toward 40% or a stricter product limit.`,
+  `After ${days} days, repay the minted stablecoin plus accrued fees in ${p.name}, close the CDP and release collateral when the debt balance reaches zero.`]],
+ [/dex|liquidity/i,[
+  `Add liquidity worth ${entry} to the main supported trading pair after checking both token assets, pool depth, fee tier and impermanent-loss exposure.`,
+  `For concentrated liquidity on ${p.name}, set a price range suited to the pair and record both token quantities and entry prices; use the full-range pool if ranges are unsupported.`,
+  `Check the pair's price range weekly; ${chain==='Ethereum'?'batch any paid range adjustment monthly':'adjust the range only when justified by price movement'}. Compare earned swap fees with impermanent loss before adding capital.`,
+  `At ${days} days, remove ${p.name} liquidity if appropriate, collect accrued pair fees and compare the two redeemed token balances with simply holding the entry assets.`]],
+ [/derivative|perp|options|trading/i,[
+  `Fund a derivatives margin account with supported stablecoin collateral worth ${entry}; inspect funding rates, liquidation rules and settlement assets.`,
+  `Use only a small part of ${p.name} margin for a supported perpetual or derivative position, with at most 1x notional exposure and a predefined loss limit; skip trades without an intended thesis.`,
+  `${monitor}: review stablecoin margin, funding payments and liquidation distance. Close positions at the loss limit and retain fills and funding records for the ${days}-day review.`]],
+ [/index/i,[
+  `Buy supported index shares worth ${entry}; inspect the underlying token basket, constituent weights, redemption method and management fees.`,
+  `${monitor}: compare ${p.name} index share price with basket NAV, track constituent rebalances and avoid buying at a large premium.`,
+  `After ${days} days, compare the index token basket return with fees and decide whether to sell shares or redeem the underlying assets.`]],
+ [/restak/i,[
+  `Restake a supported staking asset worth ${entry}; inspect the underlying validator exposure, slashing conditions and unbonding period first.`,
+  `Record the restaking receipt shares and ${p.name} operator or service allocations; verify whether additional delegation exposes the same collateral to more slashing.`,
+  `${monitor}: check operator performance, slashing events and receipt-token value. Avoid adding service exposure solely for points.`,
+  `At ${days} days, review ${p.name} restaked collateral and start the unbonding queue if exiting; allow the documented delay before redeeming receipt shares.`]],
+ [/yield|farm|vault/i,[
+  `Deposit a supported stablecoin or required LP asset worth ${entry} into the yield vault; inspect strategy contracts, reward-token exposure and lockups.`,
+  `${monitor}: compare ${p.name} vault share price and net yield after fees; claim or compound reward tokens only when the expected proceeds exceed transaction costs.`,
+  `At ${days} days, assess the yield strategy's drawdown and redeem vault shares or unstake the LP asset when the withdrawal window permits.`]],
+ [/prediction market/i,[
+  `Fund a prediction market account with a supported stablecoin worth ${entry}; read market resolution rules, oracle sources and settlement dates.`,
+  `Take small outcome-share positions on ${p.name}, risking at most 5% of this stablecoin budget per market; record the thesis, entry odds, size and maximum loss.`,
+  `${monitor}: review outcome-share prices and resolution disputes; keep trade and settlement records and avoid increasing stakes to chase losses.`,
+  `At ${days} days, sell outcome shares where liquid or retain only positions whose settlement date and resolution risk you accept; redeem resolved ${p.name} positions and log proceeds.`]],
+ [/bridge|chain/i,[
+  `Transfer a small test amount of a supported stablecoin through ${p.name} on ${chain}; verify the destination network, token contract, bridge route and finality time.`,
+  `After confirming receipt of the test stablecoin, transfer the remaining budget up to ${entry}; record source and destination transaction hashes and any wrapped-token exposure.`,
+  `${monitor}: reconcile transferred stablecoin balances and pending messages; make another transfer only for a real destination-chain need during the ${days}-day period.`]],
+ [/.*/,[
+  `Identify ${p.name}'s core ${c} action and supported asset class in its official app before committing ${entry}; skip the workflow if the product or withdrawal path cannot be verified.`,
+  `Use a supported stablecoin or the product's required base asset for one small core action within the $${amount} budget; record receipt assets, transaction hashes and withdrawal conditions.`,
+  `${monitor}: reconcile ${p.name} base-asset and receipt balances, check product-specific risks and repeat only a useful supported action. Review net results after ${days} days.`]]
+ ];
+ const workflow=playbooks.find(([pattern])=>pattern.test(c))[1];
  const steps=[
- `Prepare $${amount} for ${p.name} on ${chain}. Verify the official app, supported assets, minimums, eligibility and withdrawal terms before funding. Stop if these checks fail. Cost: $${gas.join('–')} gas allowance. Time: 10 minutes.`,
- `${action} $${amount} ${action==='Deposit'?'into':action==='Transfer'?'through':'using'} ${target} on ${chain}. Cost: $${gas.join('–')} gas plus $${fee} estimated fees/slippage allowance. Time: 20 minutes.`,
- `${cadence==='monthly'?'Monthly':'Weekly'}: monitor risks and repeat one useful supported action with the $${amount} activity on ${p.name} on ${chain} without manufacturing volume. Cost: $${gas.join('–')} gas per ${cadence} action. Time: 10 minutes ${cadence}.`,
- `At the end of the ${days}-day hold on ${chain} (${age===null?'listing age unknown':age+' days listed'}), decide whether to exit the $${amount} activity. Check the withdrawal or unstake window and claim eligibility, then log the outcome and exit decision. ${trading?'Retain trade or transfer records.':'Record any queue or lockup before withdrawing.'} Cost: $0 to review. Time: 10 minutes.`,
- `Check ${p.name}'s official rewards page for the $${amount} activity; record when no campaign exists. Never pay to claim or disclose a seed phrase. Cost: $0 to check. Time: 5 minutes weekly.`,
- `Exit the $${amount} activity on ${chain}: repay any debt, withdraw or redeem when allowed, revoke unused approvals and log transactions and fees. Cost: reserve $${gas.join('–')} gas plus documented exit fees. Time: 15 minutes; queues may add days.`
+  `Prepare $${amount} for ${p.name} (${c}) on ${chain}. Verify the official app, supported assets, minimums and eligibility. Use a cheaper non-Ethereum chain when listed; stop if checks fail. Setup: 30 minutes including entry.`,
+  ...workflow,
+  `Budget $${summary.estimated_total_fees_usd.join('–')} total estimated fees for the ${days}-day plan. Gas allowance: $${gas.join('–')} per transaction plus $${fee} service/slippage reserve. Use a ${cadence} paid-action cadence; raise capital until fees fit, and skip actions if actual fees exceed this budget.`,
+  `Check ${p.name}'s official rewards and withdrawal terms; record when no campaign exists. After the ${days}-day review, withdraw or redeem the remaining supported assets when allowed, revoke unused approvals and log fees. Never pay to claim or disclose a seed phrase.`
  ];
  return {summary,steps};
 }
